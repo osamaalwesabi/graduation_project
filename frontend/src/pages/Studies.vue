@@ -70,12 +70,16 @@
             >
               <!-- Image Section -->
               <div class="w-full md:w-[32%] mb-4 md:mb-0">
-                <img
-                  :src="getStudyImage(study)"
-                  :alt="study.title"
-                  class="w-full h-full object-cover rounded-2xl md:rounded-none"
-                  @error="handleImageError"
-                />
+                <!-- Image with safe loading -->
+                <div class="w-full h-full">
+                  <img
+                    :src="study.display_image || getStudyImage(study)"
+                    :alt="study.title"
+                    class="w-full h-64 md:h-full object-cover rounded-2xl md:rounded-none"
+                    @error="(e) => handleImageError(e, study)"
+                    loading="lazy"
+                  />
+                </div>
               </div>
 
               <!-- Text + Button Section -->
@@ -145,11 +149,16 @@ const studies = ref([]);
 // Default image for studies
 const defaultStudyImage = '/images/news-1.jpg';
 
+// Track errored images to prevent infinite loops
+const erroredImages = ref(new Set());
+
 // Fetch studies from API
 async function fetchStudies() {
   try {
     loading.value = true;
     error.value = null;
+    studies.value = [];
+    erroredImages.value.clear(); // Reset error tracking
     
     const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000/api';
     const response = await fetch(`${API_URL}/studies-content`);
@@ -164,7 +173,21 @@ async function fetchStudies() {
     if (result.success && result.data) {
       pageTitle.value = result.data.page_title;
       pageDescription.value = result.data.page_description;
-      studies.value = result.data.studies || [];
+      
+      // Process studies with proper image URLs
+      studies.value = (result.data.studies || []).map(study => {
+        // Pre-process the image URL to ensure it's valid
+        const processedStudy = {
+          ...study,
+          display_image: null, // Will be set after image validation
+          original_image_url: getStudyImage(study) // Store original URL
+        };
+        
+        // Preload image to check if it exists
+        preloadStudyImage(processedStudy);
+        
+        return processedStudy;
+      });
     } else {
       // Fallback to static data
       await fetchStaticStudies();
@@ -180,6 +203,34 @@ async function fetchStudies() {
   }
 }
 
+// Preload study image to check if it exists
+function preloadStudyImage(study) {
+  const imageUrl = study.original_image_url;
+  const studyKey = study.id || study.title;
+  
+  // Skip if we already know this image is invalid
+  if (erroredImages.value.has(studyKey)) {
+    study.display_image = defaultStudyImage;
+    return;
+  }
+  
+  const img = new Image();
+  img.onload = () => {
+    // Image loaded successfully
+    study.display_image = imageUrl;
+    // Force Vue reactivity update
+    studies.value = [...studies.value];
+  };
+  img.onerror = () => {
+    // Image failed to load
+    erroredImages.value.add(studyKey);
+    study.display_image = defaultStudyImage;
+    // Force Vue reactivity update
+    studies.value = [...studies.value];
+  };
+  img.src = imageUrl;
+}
+
 // Fallback static data function
 async function fetchStaticStudies() {
   console.log('Using static studies data');
@@ -192,15 +243,18 @@ async function fetchStaticStudies() {
       title: 'تحليل سلسلة قيمة إنتاج الملابس المحلية',
       description: 'دراسة "سلسلة القيمة للملابس المحلية" تسلط الضوء على رحلة المنتجين الصغار في أمانة العاصمة، من التحديات إلى الفرص، وتطرح رؤية عملية لتطوير الجودة، وتوسيع الأسواق، وتعزيز حضور الملابس المحلية كمنافس قوي في السوق.',
       file_url: '/documents/study-1.pdf',
-      image_url: null
+      image_url: null,
+      display_image: defaultStudyImage,
+      original_image_url: defaultStudyImage
     }
   ];
 }
 
 // Get study image - use provided image or default
 function getStudyImage(study) {
+  // First try image_url
   if (study.image_url) {
-    return study.image_url;
+    return formatImageUrl(study.image_url);
   }
   
   // Check if file_url is an image
@@ -208,7 +262,7 @@ function getStudyImage(study) {
     const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
     const lowerUrl = study.file_url.toLowerCase();
     if (imageExtensions.some(ext => lowerUrl.endsWith(ext))) {
-      return study.file_url;
+      return formatImageUrl(study.file_url);
     }
   }
   
@@ -216,10 +270,56 @@ function getStudyImage(study) {
   return defaultStudyImage;
 }
 
-// Handle image loading errors
-function handleImageError(event) {
-  console.log('Image failed to load, using default image');
-  event.target.src = defaultStudyImage;
+// Format image URL to ensure it's complete
+function formatImageUrl(url) {
+  if (!url) return defaultStudyImage;
+  
+  // If it's already a full URL, return as is
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url;
+  }
+  
+  // If it starts with /, it's already a relative path
+  if (url.startsWith('/')) {
+    return url;
+  }
+  
+  // If it's a relative path without leading slash
+  return `/${url}`;
+}
+
+// Handle image loading errors - prevent infinite loops
+function handleImageError(event, study) {
+  const studyKey = study.id || study.title;
+  const imgElement = event.target;
+  
+  // If we've already handled this image, don't do anything
+  if (erroredImages.value.has(studyKey)) {
+    return;
+  }
+  
+  console.log(`Image failed to load for study: ${study.title}`);
+  
+  // Mark this image as errored
+  erroredImages.value.add(studyKey);
+  
+  // Update the study object
+  const studyIndex = studies.value.findIndex(s => 
+    (s.id === study.id) || (s.title === study.title)
+  );
+  
+  if (studyIndex !== -1) {
+    studies.value[studyIndex].display_image = defaultStudyImage;
+    // Force Vue reactivity update
+    studies.value = [...studies.value];
+  }
+  
+  // Update the image src directly and remove error handler
+  imgElement.src = defaultStudyImage;
+  imgElement.onerror = null;
+  
+  // Prevent default error handling
+  event.preventDefault();
 }
 
 // Track study downloads (optional)
@@ -282,5 +382,26 @@ onMounted(() => {
 
 .animate-spin {
   animation: spin 1s linear infinite;
+}
+
+/* Ensure images have proper aspect ratio */
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* Add min-height to prevent layout shift */
+.w-full.md\:w-\[32\%\] {
+  min-height: 200px;
+}
+
+/* Image container styling */
+.w-full.h-full.object-cover {
+  background-color: #f3f4f6; /* Light gray background while loading */
+}
+
+.dark .w-full.h-full.object-cover {
+  background-color: #374151; /* Dark gray background in dark mode */
 }
 </style>
