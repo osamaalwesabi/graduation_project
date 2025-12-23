@@ -64,7 +64,7 @@
                border border-[#E5EDF0] dark:border-slate-700 shadow-sm
                px-6 md:px-10 py-10"
       >
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-1 gap-8">
+        <div class="grid grid-cols-1 md:grid-cols-1 lg:grid-cols-1 gap-8">
           <RouterLink
             v-for="section in sections"
             :key="section.id"
@@ -73,13 +73,14 @@
                    rounded-3xl p-6 border border-[#D8EDEE] dark:border-slate-700
                    shadow-sm block transition-all duration-300"
           >
-            <!-- Section Image -->
-            <div class="mb-4">
+            <!-- Section Image with simple error handling -->
+            <div class="mb-4 h-48 rounded-2xl overflow-hidden dark:bg-slate-700">
               <img
-                :src="getSectionImage(section)"
+                :src="section.final_image_url || section.image_url || section.image || '/assets/images/flash-1.png'"
                 :alt="section.title"
-                class="w-full h-48 object-cover rounded-2xl"
-                @error="handleImageError"
+                class="w-full h-full object-cover"
+                @error="(e) => handleImageErrorOnce(e, section)"
+                loading="lazy"
               />
             </div>
 
@@ -89,10 +90,7 @@
                 {{ section.title }}
               </h3>
               
-              <!-- <p class="text-slate-600 dark:text-slate-100 leading-7 text-[15px] line-clamp-2 mb-3">
-                {{ section.description }}
-              </p>
-               -->
+              
               <!-- Videos Count -->
               <div class="flex items-center justify-between">
                 <span class="text-sm text-slate-500 dark:text-slate-400">
@@ -137,11 +135,16 @@ const pageTitle = ref('')
 const pageDescription = ref('')
 const sections = ref([])
 
+// Track which images have already errored
+const erroredImages = ref(new Set())
+
 // Fetch awareness flashes sections from API
 async function fetchAwarenessFlashes() {
   try {
     loading.value = true
     error.value = null
+    sections.value = []
+    erroredImages.value.clear() // Reset error tracking
     
     const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000/api'
     const response = await fetch(`${API_URL}/awareness-flashes-content`)
@@ -156,7 +159,18 @@ async function fetchAwarenessFlashes() {
     if (result.success && result.data) {
       pageTitle.value = result.data.page_title
       pageDescription.value = result.data.page_description
-      sections.value = result.data.sections || []
+      
+      // Process sections with proper image URLs
+      sections.value = (result.data.sections || []).map(section => {
+        // Get the best available image URL
+        const imageUrl = getBestImageUrl(section)
+        
+        return {
+          ...section,
+          image_url: imageUrl,
+          final_image_url: null // This will be set if image fails to load
+        }
+      })
     } else {
       // Fallback to static data
       await fetchStaticSections()
@@ -184,6 +198,8 @@ async function fetchStaticSections() {
       title: 'فيديوهات توعوية (الصناعات المنزلية)',
       description: 'مجموعة فيديوهات توضح خطوات الصناعات الغذائية المنزلية بطريقة آمنة وسهلة.',
       image: '/assets/images/flash-1.png',
+      image_url: '/assets/images/flash-1.png',
+      final_image_url: null,
       slug: 'home-industry',
       link: '/media/flashes/home-industry',
       videos_count: 6,
@@ -194,6 +210,8 @@ async function fetchStaticSections() {
       title: 'فلاشات توعوية (الصحة الحيوانية)',
       description: 'مواد مرئية توعوية للحفاظ على صحة المواشي وتحسين الإنتاج.',
       image: '/assets/images/flash-1.png',
+      image_url: '/assets/images/flash-1.png',
+      final_image_url: null,
       slug: 'animal-health',
       link: '/media/flashes/animal-health',
       videos_count: 3,
@@ -204,6 +222,8 @@ async function fetchStaticSections() {
       title: 'سلسلة تعلّم في دقيقة',
       description: 'فيديوهات سريعة تسلط الضوء على مهارات ونصائح لأصحاب المشاريع الصغيرة.',
       image: '/assets/images/flash-1.png',
+      image_url: '/assets/images/flash-1.png',
+      final_image_url: null,
       slug: 'learn-in-a-minute',
       link: '/media/flashes/learn-in-a-minute',
       videos_count: 6,
@@ -212,25 +232,72 @@ async function fetchStaticSections() {
   ]
 }
 
-// Get section image
-function getSectionImage(section) {
-  if (section.image && section.image !== '/assets/images/flash-1.png') {
-    // If image is already a full URL or starts with /, use as is
-    if (section.image.startsWith('http') || section.image.startsWith('/')) {
-      return section.image
+// Get the best available image URL for a section
+function getBestImageUrl(section) {
+  // Try different image sources in order of preference
+  const sources = [
+    section.image,        // Original image field
+    section.image_url,    // Processed image_url field
+    '/assets/images/flash-1.png' // Default
+  ].filter(Boolean) // Remove null/undefined values
+  
+  // Return the first valid source
+  for (const source of sources) {
+    if (source) {
+      return formatImageUrl(source)
     }
-    // Otherwise, prepend with /assets/images/
-    return `/assets/images/${section.image}`
   }
   
-  // Use default image
   return '/assets/images/flash-1.png'
 }
 
-// Handle image loading errors
-function handleImageError(event) {
-  console.log('Section image failed to load, using default')
+// Format image URL to ensure it's complete
+function formatImageUrl(url) {
+  if (!url) return '/assets/images/flash-1.png'
+  
+  // If it's already a full URL, return as is
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url
+  }
+  
+  // If it starts with /, it's already a relative path
+  if (url.startsWith('/')) {
+    return url
+  }
+  
+  // Otherwise, assume it's relative to /assets/images/
+  return `/assets/images/${url}`
+}
+
+// Handle image error - only once per image
+function handleImageErrorOnce(event, section) {
+  const sectionKey = `${section.id}-${section.title}`
+  
+  // If we've already tried to fix this image, don't do it again
+  if (erroredImages.value.has(sectionKey)) {
+    return
+  }
+  
+  // Mark this image as errored
+  erroredImages.value.add(sectionKey)
+  
+  console.log(`Image failed to load for section: ${section.title}`)
+  
+  // Find the section in the array and update its final_image_url
+  const sectionIndex = sections.value.findIndex(s => s.id === section.id)
+  if (sectionIndex !== -1) {
+    // Use a default image
+    sections.value[sectionIndex].final_image_url = '/assets/images/flash-1.png'
+    
+    // Force Vue to update the DOM
+    sections.value = [...sections.value]
+  }
+  
+  // Update the image src directly
   event.target.src = '/assets/images/flash-1.png'
+  
+  // Remove the error listener to prevent infinite loops
+  event.target.onerror = null
 }
 
 // Fetch data when component mounts
@@ -271,5 +338,21 @@ onMounted(() => {
 
 .animate-spin {
   animation: spin 1s linear infinite;
+}
+
+/* Ensure images don't cause layout shifts */
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* Add background color for image container */
+.bg-gray-100 {
+  background-color: #f3f4f6;
+}
+
+.dark .bg-slate-700 {
+  background-color: #334155;
 }
 </style>
